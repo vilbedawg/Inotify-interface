@@ -1,0 +1,34 @@
+---
+Language: Cpp
+# Based on the Google style with customized parameters
+BasedOnStyle: Google
+# Indentation width
+IndentWidth: 2
+# Continuation indent width for multi-line expressions
+ContinuationIndentWidth: 4
+# Align function parameters on new lines
+AlignAfterOpenBracket: DontAlign
+# Put function parameters on new lines if they exceed a certain number
+BinPackParameters: false
+BinPackArguments: false
+# Break function declaration before the first parameter if there are many
+AllowAllParametersOfDeclarationOnNextLine: false
+# Break constructor initializers before colon and indent the list
+BreakConstructorInitializersBeforeComma: true
+ConstructorInitializerIndentWidth: 2
+# Ensure a function call breaks after the opening parenthesis if needed
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: true
+  AfterClass: true
+  SplitEmptyFunction: true
+  AfterControlStatement: true
+  BeforeElse: true
+# Ensure pointer/reference alignment with the type (e.g. int *x)
+PointerAlignment: Left
+# Limit the column width for breaking
+ColumnLimit: 100
+# Formatting for include lines
+SortIncludes: false
+---
+
