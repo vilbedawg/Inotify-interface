@@ -10,16 +10,18 @@ set(SOURCES
     src/main.cpp
     src/Inotify.cpp
     src/Notifier.cpp
+    src/Event.cpp
 )
 
 set(HEADERS
     include/Inotify.hpp
     include/Event.hpp
     include/Notifier.hpp
+    include/Event.hpp
 )
 
-# Create the executable
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
+
 add_executable(inotify ${SOURCES} ${HEADERS})
 
-# Installation
 install(TARGETS inotify DESTINATION /opt/${CMAKE_PROJECT_NAME}/bin)

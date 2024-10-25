@@ -9,6 +9,7 @@
 namespace inotify {
 
 Inotify::Inotify()
+: _eventBuffer(MAX_EVENTS * (EVENT_SIZE + NAME_MAX))
 {
   std::cout << "Inotify constructor" << std::endl;
   _file_descriptor = inotify_init();
@@ -86,6 +87,42 @@ void Inotify::unwatchDirectory(const std::filesystem::path &path)
   }
 
   std::cout << "No longer watching " << path << std::endl;
+}
+
+std::optional<Event> Inotify::readNextEvent()
+{
+  std::stringstream error_stream;
+
+  ssize_t length = readEventsToBuffer();
+  ssize_t i = 0;
+
+  while (i < length)
+  {
+    const auto *event = (struct inotify_event *)&_eventBuffer[i];
+    std::string path = _watch_descriptors_map[event->wd];
+    std::string filename = event->len > 0 ? event->name : "";
+  
+    Event e(event->wd, event->mask, path + "/" + filename, std::chrono::steady_clock::now());
+    _eventQueue.push(e);
+  
+    i += EVENT_SIZE + event->len;
+  }
+  //
+  // return _eventQueue.front();
+  return std::nullopt;
+}
+
+ssize_t Inotify::readEventsToBuffer()
+{
+  ssize_t length = read(_file_descriptor, _eventBuffer.data(), _eventBuffer.size());
+  if (length == -1)
+  {
+    std::stringstream error_stream;
+    error_stream << "Failed to read events: " << strerror(errno);
+    throw std::runtime_error(error_stream.str());
+  }
+
+  return length;
 }
 
 }  // namespace inotify

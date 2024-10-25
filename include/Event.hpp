@@ -8,7 +8,7 @@ class Event
   Event(int watch_descriptor,
       uint32_t mask,
       const std::filesystem::path &path,
-      const std::chrono::system_clock::time_point &event_time);
+      const std::chrono::steady_clock::time_point &event_time);
 
   ~Event();
 
@@ -16,7 +16,7 @@ class Event
   int watch_descriptor;
   uint32_t mask;
   std::filesystem::path path;
-  std::chrono::system_clock::time_point event_time;
+  std::chrono::steady_clock::time_point event_time;
 };
 }  // namespace inotify
 

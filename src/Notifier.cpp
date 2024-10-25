@@ -1,4 +1,5 @@
 #include "../include/Notifier.hpp"
+#include <iostream>
 
 namespace inotify {
 
@@ -12,6 +13,12 @@ void Notifier::watchDirectory(const std::filesystem::path& path)
 void Notifier::unwatchDirectory(const std::filesystem::path& path)
 {
   _inotify->unwatchDirectory(path); // Delegate the call to the Inotify object
+}
+
+void Notifier::run()
+{
+  auto event = _inotify->readNextEvent();
+  std::cout << "Event occurred" << std::endl;
 }
 
 }  // namespace inotify
