@@ -15,6 +15,7 @@ class Event
   ~Event();
 
   std::string getEventType() const;
+  std::string getEventTime() const;
 
 private:
   std::string formatTime(const std::chrono::steady_clock::time_point &event_time) const;
@@ -22,8 +23,8 @@ private:
  public:
   int watch_descriptor;
   uint32_t mask;
-  std::filesystem::path path;
-  const std::string timestamp;
+  const std::filesystem::path path;
+  const std::chrono::steady_clock::time_point event_time;
 };
 }  // namespace inotify
 
