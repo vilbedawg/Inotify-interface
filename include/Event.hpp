@@ -1,6 +1,8 @@
 #ifndef EVENT_HPP
 
 #include <filesystem>
+#include <sys/inotify.h>
+
 namespace inotify {
 class Event
 {
@@ -12,11 +14,16 @@ class Event
 
   ~Event();
 
+  std::string getEventType() const;
+
+private:
+  std::string formatTime(const std::chrono::steady_clock::time_point &event_time) const;
+
  public:
   int watch_descriptor;
   uint32_t mask;
   std::filesystem::path path;
-  std::chrono::steady_clock::time_point event_time;
+  const std::string timestamp;
 };
 }  // namespace inotify
 
