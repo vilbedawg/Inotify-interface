@@ -1,4 +1,4 @@
-#include "../include/Inotify.hpp"
+#include "include/Inotify.hpp"
 #include <iostream>
 #include <thread>
 #include <csignal>
@@ -6,13 +6,11 @@
 #include <filesystem>
 
 // Global state variables for program status
-namespace {
 bool running = true;
 bool had_error = false;
-}  // namespace
 
 // Signal handler to gracefully stop the program
-void signalHandler(int signal) { running = false; }
+static void signalHandler(int signal) { running = false; }
 
 int main(int argc, char* argv[])
 {
@@ -34,9 +32,11 @@ int main(int argc, char* argv[])
       inotify->run();
     } catch (std::exception& e)
     {
-      running = false;
+      std::cout << "Unexpected error: " << e.what() << std::endl;
       had_error = true;
     }
+
+    running = false;
   });
 
   // Keep the main thread alive until the signal is received

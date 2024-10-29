@@ -3,6 +3,8 @@ project(inotify)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 
 find_package(Threads REQUIRED)
 
@@ -22,6 +24,8 @@ set(HEADERS
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
 
 add_executable(inotify ${SOURCES} ${HEADERS})
+
+target_include_directories(inotify PRIVATE include)
 
 target_link_libraries(inotify PRIVATE Threads::Threads)
 

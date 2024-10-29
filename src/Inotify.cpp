@@ -1,7 +1,5 @@
-#include "../include/Inotify.hpp"
+#include "include/Inotify.hpp"
 #include <cstring>
-#include <filesystem>
-#include <iostream>
 #include <sstream>
 #include <sys/inotify.h>
 #include <sys/epoll.h>
@@ -80,59 +78,10 @@ Inotify::~Inotify()
   close(_event_fd);
 }
 
-void Inotify::stop()
-{
-  _stopped = true;
-
-  // Sends a signal to the eventfd to interrupt epoll_wait
-  uint64_t buffer = 1;
-  if (write(_event_fd, &buffer, sizeof(buffer)) == -1)
-  {
-    throw std::runtime_error("Failed to signal eventfd for stop");
-  }
-}
-
-int Inotify::addWatch(const std::string &pathname)
-{
-  std::stringstream error_stream;
-  if (!std::filesystem::exists(pathname))
-  {
-    error_stream << "Specified path does not exist: " << pathname;
-    throw std::invalid_argument(error_stream.str());
-  }
-
-  if (!std::filesystem::is_directory(pathname))
-  {
-    error_stream << "Specified path is not a directory: " << pathname;
-    throw std::invalid_argument(error_stream.str());
-  }
-
-  const int flags = IN_MODIFY | IN_CREATE | IN_MOVE | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF;
-
-  int wd = inotify_add_watch(_inotify_fd, pathname.c_str(), flags);
-  if (wd == -1)
-  {
-    error_stream << "Failed to watch directory: " << strerror(errno);
-    throw std::runtime_error("Failed to watch directory: " + pathname);
-  }
-
-  _wd_cache.insert({wd, pathname});
-
-  return wd;
-}
-
-void Inotify::removeWatch(int wd)
-{
-  if (inotify_rm_watch(_inotify_fd, wd) == -1)
-  {
-    std::stringstream error_stream;
-    error_stream << "Failed to unwatch directory: " << strerror(errno);
-    throw std::runtime_error(error_stream.str());
-  }
-}
-
 void Inotify::run()
 {
+  _stopped = false;
+
   while (!_stopped)
   {
     ssize_t length = readEventsIntoBuffer();
@@ -140,6 +89,58 @@ void Inotify::run()
   }
 }
 
+void Inotify::stop()
+{
+  _stopped = true;
+
+  /* Write a signal to the eventfd to interrupt the epoll_wait call */
+  uint64_t buffer = 1;
+  if (write(_event_fd, &buffer, sizeof(buffer)) == -1)
+  {
+    throw std::runtime_error("Failed to signal eventfd for stop");
+  }
+}
+
+int Inotify::addWatch(const std::filesystem::path &path)
+{
+  std::stringstream error_stream;
+  if (!std::filesystem::exists(path))
+  {
+    error_stream << "Specified path does not exist: " << path;
+    throw std::invalid_argument(error_stream.str());
+  }
+
+  if (!std::filesystem::is_directory(path))
+  {
+    error_stream << "Specified path is not a directory: " << path;
+    throw std::invalid_argument(error_stream.str());
+  }
+
+  // Watch for file creation, deletion, and modification events
+  const int flags = IN_MODIFY | IN_CREATE | IN_MOVE | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF;
+
+  int wd = inotify_add_watch(_inotify_fd, path.c_str(), flags | IN_DONT_FOLLOW); // Do not follow symlinks
+  if (wd == -1)
+  {
+    error_stream << "Failed to watch directory: " << path << strerror(errno);
+    throw std::runtime_error(error_stream.str());
+  }
+
+  // Add the watch descriptor to the cache
+  _wd_cache.insert(std::make_pair(wd, path));
+
+  return wd;
+}
+
+/**
+ * @brief Reads inotify events into the buffer.
+ *
+ * This function waits for events using epoll_wait and reads inotify events into the buffer.
+ * It handles the stop signal and reads events from the inotify file descriptor.
+ *
+ * @return The number of bytes read into the buffer.
+ * @throws std::runtime_error if reading events fails.
+ */
 ssize_t Inotify::readEventsIntoBuffer()
 {
   ssize_t length = 0;
@@ -150,11 +151,16 @@ ssize_t Inotify::readEventsIntoBuffer()
 
   for (int i = 0; i < triggered_events; ++i)
   {
-    if (_epoll_events[i].data.fd == _event_fd) break;
+    // Check if the event fd was triggered by the stop signal
+    if (_epoll_events[i].data.fd == _event_fd)
+    {
+      break;  // Stop if stop signal received
+    }
 
+    // Check if the inotify fd was triggered
     if (_epoll_events[i].data.fd == _inotify_fd)
     {
-      length = read(_inotify_fd, _event_buffer.data(), _event_buffer.size());
+      length = read(_inotify_fd, _event_buffer.data(), _event_buffer.size()); // Read events into buffer
 
       if (length == -1)
       {
@@ -185,7 +191,7 @@ void Inotify::readEventsFromBuffer(ssize_t length)
       continue;
     }
 
-    std::string full_path = _wd_cache.at(event->wd) / std::string(event->name);
+    std::filesystem::path full_path = _wd_cache.at(event->wd) / std::string(event->name);
 
     if ((event->mask & IN_ISDIR) && (event->mask & (IN_CREATE | IN_MOVED_TO)))
     {
