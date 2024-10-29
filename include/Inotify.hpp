@@ -5,8 +5,9 @@
 #include <sys/inotify.h>
 #include <atomic>
 #include <filesystem>
-#include <queue>
+#include <unordered_map>
 #include <vector>
+#include "Logger.hpp"
 
 #define MAX_EVENTS 4096                            // Max. number of events to process at one go
 #define NAME_MAX 16                                // Maximum number of bytes in filename
@@ -17,23 +18,18 @@
 
 namespace inotify {
 
-static const uint32_t NOTIFY_FLAGS =
-    IN_CREATE | IN_DELETE | IN_MODIFY | IN_MOVED_FROM | IN_MOVED_TO | IN_ONLYDIR;
-
 class Inotify
 {
  public:
-  Inotify();
+  explicit Inotify(const std::filesystem::path& path);
   ~Inotify();
 
-  int addWatch(const std::filesystem::path &path);
-  void removeWatch(int wd);
-  inotify_event *readNextEvent();
-
+  void run();
   void stop();
-  bool isStopped() const;
 
  private:
+  int addWatch(const std::string& pathname);
+  void removeWatch(int wd);
   ssize_t readEventsIntoBuffer();
   void readEventsFromBuffer(ssize_t length);
 
@@ -46,9 +42,11 @@ class Inotify
   epoll_event _stop_epoll_event;                // Epoll event for interrupting epolls
   epoll_event _epoll_events[MAX_EPOLL_EVENTS];  // Array of epoll events
 
-  std::vector<uint8_t> _event_buffer;        // Buffer to store inotify events
-  std::queue<inotify_event *> _event_queue;  // Queue to store inotify events
-  std::atomic<bool> _stopped;                // Flag to stop the inotify instance
+  std::unordered_map<int, std::filesystem::path> _wd_cache;  // Cache to store wd to path mapping
+  Logger _logger;                                            // Logger instance
+
+  std::vector<uint8_t> _event_buffer;  // Buffer to store inotify events
+  std::atomic<bool> _stopped;          // Flag to stop the inotify instance
 };
 
 }  // namespace inotify

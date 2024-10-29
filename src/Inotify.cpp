@@ -1,6 +1,7 @@
 #include "../include/Inotify.hpp"
 #include <cstring>
 #include <filesystem>
+#include <iostream>
 #include <sstream>
 #include <sys/inotify.h>
 #include <sys/epoll.h>
@@ -9,7 +10,7 @@
 
 namespace inotify {
 
-Inotify::Inotify() : _event_buffer(EVENT_BUFFER_LEN, 0)
+Inotify::Inotify(const std::filesystem::path &path) : _event_buffer(EVENT_BUFFER_LEN, 0)
 {
   std::stringstream error_stream;
 
@@ -56,6 +57,18 @@ Inotify::Inotify() : _event_buffer(EVENT_BUFFER_LEN, 0)
     error_stream << "Failed to add event file descriptor to epoll: " << strerror(errno);
     throw std::runtime_error(error_stream.str());
   }
+
+  // initialize by watching the specified directory
+  addWatch(path);
+  for (const auto &entry : std::filesystem::recursive_directory_iterator(path))
+  {
+    if (entry.is_directory())
+    {
+      addWatch(entry.path().string());
+    }
+  }
+
+  _logger.logEvent("Watching directory: %s", path.c_str());
 }
 
 Inotify::~Inotify()
@@ -79,29 +92,31 @@ void Inotify::stop()
   }
 }
 
-bool Inotify::isStopped() const { return _stopped; }
-
-int Inotify::addWatch(const std::filesystem::path &path)
+int Inotify::addWatch(const std::string &pathname)
 {
-  if (!std::filesystem::exists(path))
+  std::stringstream error_stream;
+  if (!std::filesystem::exists(pathname))
   {
-    throw std::invalid_argument(
-        "Failed to check watch directory: " + path.string() + " does not exist");
+    error_stream << "Specified path does not exist: " << pathname;
+    throw std::invalid_argument(error_stream.str());
   }
 
-  if (!std::filesystem::is_directory(path))
+  if (!std::filesystem::is_directory(pathname))
   {
-    throw std::invalid_argument(
-        "Failed to check watch directory: " + path.string() + " is not a directory");
+    error_stream << "Specified path is not a directory: " << pathname;
+    throw std::invalid_argument(error_stream.str());
   }
 
-  int wd = inotify_add_watch(_inotify_fd, path.c_str(), NOTIFY_FLAGS);
+  const int flags = IN_MODIFY | IN_CREATE | IN_MOVE | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF;
+
+  int wd = inotify_add_watch(_inotify_fd, pathname.c_str(), flags);
   if (wd == -1)
   {
-    std::stringstream error_stream;
     error_stream << "Failed to watch directory: " << strerror(errno);
-    throw std::runtime_error("Failed to watch directory: " + path.string());
+    throw std::runtime_error("Failed to watch directory: " + pathname);
   }
+
+  _wd_cache.insert({wd, pathname});
 
   return wd;
 }
@@ -116,19 +131,13 @@ void Inotify::removeWatch(int wd)
   }
 }
 
-inotify_event *Inotify::readNextEvent()
+void Inotify::run()
 {
-  while (_event_queue.empty() && !_stopped)
+  while (!_stopped)
   {
     ssize_t length = readEventsIntoBuffer();
     if (length > 0) readEventsFromBuffer(length);
   }
-
-  if (_stopped) return nullptr;
-
-  inotify_event *nextEvent = _event_queue.front();
-  _event_queue.pop();
-  return nextEvent;
 }
 
 ssize_t Inotify::readEventsIntoBuffer()
@@ -166,7 +175,81 @@ void Inotify::readEventsFromBuffer(ssize_t length)
   while (i < length)
   {
     const auto event = (struct inotify_event *)&event_buffer[i];
-    _event_queue.push(event);
+
+    if (event->mask & IN_IGNORED)
+    {
+      /* Watch was removed explicitly or automatically
+       * clear the corresponding item from the cache. */
+      _wd_cache.erase(event->wd);
+      i += EVENT_SIZE + event->len;
+      continue;
+    }
+
+    std::string full_path = _wd_cache.at(event->wd) / std::string(event->name);
+
+    if ((event->mask & IN_ISDIR) && (event->mask & (IN_CREATE | IN_MOVED_TO)))
+    {
+      /* A new subdirectory was created, or a subdirectory was renamed into
+       * the tree; create watches for it, and all of its subdirectories. */
+      _logger.logEvent("Created directory: %s", full_path.c_str());
+
+      addWatch(full_path);
+      for (const auto &entry : std::filesystem::recursive_directory_iterator(full_path))
+      {
+        if (entry.is_directory())
+        {
+          addWatch(entry.path().string());
+        }
+      }
+    }
+    else if (event->mask & IN_DELETE_SELF)
+    {
+      /* A directory was deleted. Remove the corresponding item from the cache. */
+      _logger.logEvent("Deleted directory: %s", full_path.c_str());
+      _wd_cache.erase(event->wd);
+    }
+    else if (event->mask & IN_MOVED_FROM)
+    {
+      struct inotify_event *next_event =
+          (struct inotify_event *)&event_buffer[i + EVENT_SIZE + event->len];
+
+      if (next_event->len < length && (next_event->mask & IN_MOVED_TO) &&
+          (next_event->cookie == event->cookie))
+      {
+        std::string new_path = _wd_cache.at(next_event->wd) / std::string(next_event->name);
+        if (event->mask & IN_ISDIR)
+        {
+          _logger.logEvent("Renamed directory %s ==> %s", full_path.c_str(), new_path.c_str());
+        }
+        else
+        {
+          _logger.logEvent("Renamed file %s ==> %s", full_path.c_str(), new_path.c_str());
+        }
+
+        i += EVENT_SIZE + next_event->len;
+      }
+      else
+      {
+        _logger.logEvent("Moved out of watch directory: %s", full_path.c_str());
+      }
+    }
+    else if (event->mask & IN_MODIFY)
+    {
+      _logger.logEvent("Modified file: %s", full_path.c_str());
+    }
+    else if (event->mask & IN_CREATE)
+    {
+      _logger.logEvent("Created file: %s", full_path.c_str());
+    }
+    else if (event->mask & IN_DELETE)
+    {
+      if (!(event->mask & IN_ISDIR))
+      {
+        _logger.logEvent("Deleted file: %s", full_path.c_str());
+      }
+      /* ignore delete events for directories since they are handled by IN_DELETE_SELF */
+    }
+
     i += EVENT_SIZE + event->len;
   }
 }

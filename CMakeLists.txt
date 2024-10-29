@@ -11,12 +11,12 @@ include_directories(include)
 set(SOURCES
     src/main.cpp
     src/Inotify.cpp
-    src/Notifier.cpp
+    src/Logger.cpp
 )
 
 set(HEADERS
     include/Inotify.hpp
-    include/Notifier.hpp
+    include/Logger.hpp
 )
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
