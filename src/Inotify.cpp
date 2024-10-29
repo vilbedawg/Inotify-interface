@@ -1,17 +1,16 @@
 #include "../include/Inotify.hpp"
 #include <cstring>
 #include <filesystem>
-#include <iostream>
 #include <sstream>
 #include <sys/inotify.h>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <unistd.h>
 
 namespace inotify {
 
 Inotify::Inotify() : _event_buffer(EVENT_BUFFER_LEN, 0)
 {
-  std::cout << "Inotify constructor" << std::endl;
   std::stringstream error_stream;
 
   // Initialize the inotify instance
@@ -22,22 +21,39 @@ Inotify::Inotify() : _event_buffer(EVENT_BUFFER_LEN, 0)
     throw std::runtime_error(error_stream.str());
   }
 
+  // Initialize the event file descriptor for interrupting
+  _event_fd = eventfd(0, EFD_NONBLOCK);
+  if (_event_fd < 0)
+  {
+    error_stream << "Failed to initialize event file descriptor: " << strerror(errno);
+    throw std::runtime_error(error_stream.str());
+  }
+
   // Initialize the epoll instance
   _epoll_fd = epoll_create1(0);
   if (_epoll_fd < 0)
   {
-    error_stream << "Failed to create epoll instance: " << strerror(errno);
+    error_stream << "Failed to initialize epoll instance: " << strerror(errno);
     throw std::runtime_error(error_stream.str());
   }
 
   // Register inotify file descriptor with epoll
   _inotify_epoll_event.events = EPOLLIN;
   _inotify_epoll_event.data.fd = _inotify_fd;
+
   if (epoll_ctl(_epoll_fd, EPOLL_CTL_ADD, _inotify_fd, &_inotify_epoll_event) == -1)
   {
-    close(_inotify_fd);
-    close(_epoll_fd);
     error_stream << "Failed to add inotify file descriptor to epoll: " << strerror(errno);
+    throw std::runtime_error(error_stream.str());
+  }
+
+  // Register event file descriptor with epoll for interrupts
+  _stop_epoll_event.events = EPOLLIN;
+  _stop_epoll_event.data.fd = _event_fd;
+
+  if (epoll_ctl(_epoll_fd, EPOLL_CTL_ADD, _event_fd, &_stop_epoll_event) == -1)
+  {
+    error_stream << "Failed to add event file descriptor to epoll: " << strerror(errno);
     throw std::runtime_error(error_stream.str());
   }
 }
@@ -45,61 +61,27 @@ Inotify::Inotify() : _event_buffer(EVENT_BUFFER_LEN, 0)
 Inotify::~Inotify()
 {
   epoll_ctl(_epoll_fd, EPOLL_CTL_DEL, _inotify_fd, 0);
+  epoll_ctl(_epoll_fd, EPOLL_CTL_DEL, _event_fd, 0);
   close(_inotify_fd);
   close(_epoll_fd);
+  close(_event_fd);
 }
 
-void Inotify::watchDirectory(const std::filesystem::path &path)
+void Inotify::stop()
 {
-  std::stringstream error_stream;
+  _stopped = true;
 
-  if (!checkWatchDirectory(path)) return;
-
-  int watch_descriptor =
-      inotify_add_watch(_inotify_fd, path.c_str(), IN_CREATE | IN_DELETE | IN_MODIFY);
-
-  if (watch_descriptor == -1)
+  // Sends a signal to the eventfd to interrupt epoll_wait
+  uint64_t buffer = 1;
+  if (write(_event_fd, &buffer, sizeof(buffer)) == -1)
   {
-    error_stream << "Failed to watch directory: " << strerror(errno);
-    throw std::runtime_error("Failed to watch directory: " + path.string());
+    throw std::runtime_error("Failed to signal eventfd for stop");
   }
-
-  std::cout << "Watching " << path << std::endl;
-  _watch_descriptors_map.insert(std::make_pair(watch_descriptor, path));
 }
 
-void Inotify::unwatchDirectory(const std::filesystem::path &path)
-{
-  std::stringstream error_stream;
+bool Inotify::isStopped() const { return _stopped; }
 
-  // find the watch descriptor from the map with the path
-  int watch_descriptor = -1;
-  for (auto it = _watch_descriptors_map.begin(); it != _watch_descriptors_map.end(); ++it)
-  {
-    if (it->second == path)
-    {
-      watch_descriptor = it->first;
-      break;
-    }
-  }
-
-  if (watch_descriptor == -1)
-  {
-    error_stream << "Failed to unwatch directory: " << path << " is not being watched";
-    throw std::invalid_argument(error_stream.str());
-  }
-
-  int result = inotify_rm_watch(_inotify_fd, watch_descriptor);
-  if (result == -1)
-  {
-    error_stream << "Failed to unwatch directory: " << strerror(errno);
-    throw std::runtime_error(error_stream.str());
-  }
-
-  std::cout << "No longer watching " << path << std::endl;
-}
-
-bool Inotify::checkWatchDirectory(const std::filesystem::path &path)
+int Inotify::addWatch(const std::filesystem::path &path)
 {
   if (!std::filesystem::exists(path))
   {
@@ -113,61 +95,79 @@ bool Inotify::checkWatchDirectory(const std::filesystem::path &path)
         "Failed to check watch directory: " + path.string() + " is not a directory");
   }
 
-  return true;
-}
-
-std::optional<Event> Inotify::readNextEvent()
-{
-  while (_event_queue.empty())
+  int wd = inotify_add_watch(_inotify_fd, path.c_str(), NOTIFY_FLAGS);
+  if (wd == -1)
   {
-    ssize_t length = readEventsIntoBuffer();
-    readEventsFromBuffer(length);
+    std::stringstream error_stream;
+    error_stream << "Failed to watch directory: " << strerror(errno);
+    throw std::runtime_error("Failed to watch directory: " + path.string());
   }
 
-  Event nextEvent = _event_queue.front();
+  return wd;
+}
+
+void Inotify::removeWatch(int wd)
+{
+  if (inotify_rm_watch(_inotify_fd, wd) == -1)
+  {
+    std::stringstream error_stream;
+    error_stream << "Failed to unwatch directory: " << strerror(errno);
+    throw std::runtime_error(error_stream.str());
+  }
+}
+
+inotify_event *Inotify::readNextEvent()
+{
+  while (_event_queue.empty() && !_stopped)
+  {
+    ssize_t length = readEventsIntoBuffer();
+    if (length > 0) readEventsFromBuffer(length);
+  }
+
+  if (_stopped) return nullptr;
+
+  inotify_event *nextEvent = _event_queue.front();
   _event_queue.pop();
   return nextEvent;
 }
 
 ssize_t Inotify::readEventsIntoBuffer()
 {
-  ssize_t no_of_events = 0;
+  ssize_t length = 0;
   const int timeout = -1;
   int triggered_events = epoll_wait(_epoll_fd, _epoll_events, MAX_EVENTS, timeout);
 
-  if (triggered_events == -1) return no_of_events;
+  if (triggered_events == -1) return length;
 
   for (int i = 0; i < triggered_events; ++i)
   {
-    if (_epoll_events[i].data.fd != _inotify_fd) continue;
+    if (_epoll_events[i].data.fd == _event_fd) break;
 
-    no_of_events =
-        read(_inotify_fd, _event_buffer.data(), _event_buffer.size());  // Reads events into buffer
-
-    if (no_of_events == -1)
+    if (_epoll_events[i].data.fd == _inotify_fd)
     {
-      std::stringstream error_stream;
-      error_stream << "Failed to read events: " << strerror(errno);
-      throw std::runtime_error(error_stream.str());
+      length = read(_inotify_fd, _event_buffer.data(), _event_buffer.size());
+
+      if (length == -1)
+      {
+        std::stringstream error_stream;
+        error_stream << "Failed to read events: " << strerror(errno);
+        throw std::runtime_error(error_stream.str());
+      }
     }
   }
 
-  return no_of_events;
+  return length;
 }
 
 void Inotify::readEventsFromBuffer(ssize_t length)
 {
   uint8_t *event_buffer = _event_buffer.data();
-  struct inotify_event *event;
-
-  for (ssize_t i = 0; i < length; i += EVENT_SIZE + event->len)
+  ssize_t i = 0;
+  while (i < length)
   {
-    event = (struct inotify_event *)&event_buffer[i];
-    std::string path = _watch_descriptors_map[event->wd];
-    std::string filename = event->len > 0 ? event->name : "";
-
-    Event e(event->wd, event->mask, path + "/" + filename, std::chrono::steady_clock::now());
-    _event_queue.push(e);
+    const auto event = (struct inotify_event *)&event_buffer[i];
+    _event_queue.push(event);
+    i += EVENT_SIZE + event->len;
   }
 }
 
