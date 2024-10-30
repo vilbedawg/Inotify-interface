@@ -6,7 +6,9 @@
 #include <atomic>
 #include <filesystem>
 #include <unordered_map>
+#include <queue>
 #include <vector>
+#include "FileEvent.hpp"
 #include "Logger.hpp"
 
 #define MAX_EVENTS 4096 /* Max. number of events that can be read into the buffer */
@@ -30,8 +32,14 @@ class Inotify
 
  private:
   int addWatch(const std::filesystem::path& path);
+
   ssize_t readEventsIntoBuffer();
   void readEventsFromBuffer(ssize_t length);
+
+  void processFileEvent(const FileEvent& event);
+  void processDirectoryEvent(const FileEvent& event);
+  void signalStop();
+  void runOnce();
 
  private:
   int _inotify_fd; /* File descriptor for inotify */
@@ -47,8 +55,9 @@ class Inotify
 
   Logger _logger; /* For logging events */
 
-  std::vector<uint8_t> _event_buffer; /* Buffer to store inotify events */
-  std::atomic<bool> _stopped;         /* Flag to stop the inotify instance */
+  std::array<uint8_t, EVENT_BUFFER_LEN> _event_buffer; /* Buffer to store inotify events */
+  std::queue<FileEvent> _event_queue;                  /* Queue to store inotify events */
+  std::atomic<bool> _stopped;                          /* Flag to stop the inotify instance */
 };
 
 }  // namespace inotify
