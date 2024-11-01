@@ -9,6 +9,7 @@ class Logger
 {
  public:
   void logEvent(const char *format, ...);
+  void logError(const char *format, ...);
 
  private:
   std::string getTimestamp() const;

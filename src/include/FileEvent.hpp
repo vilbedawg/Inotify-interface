@@ -3,28 +3,20 @@
 
 #include <sys/inotify.h>
 #include <cstdint>
-#include <chrono>
 #include <string>
 
 namespace inotify {
 
 struct FileEvent {
-  int wd;                                          /* Watch descriptor */
-  uint32_t mask;                                   /* Watch mask */
-  uint32_t cookie;                                 /* Cookie to synchronize two events */
-  std::string filename;                            /* Name of the file */
-  std::chrono::steady_clock::time_point timestamp; /* Timestamp of the event */
+  int wd;               /* Watch descriptor */
+  uint32_t mask;        /* Watch mask */
+  uint32_t cookie;      /* Cookie to synchronize two events */
+  std::string filename; /* Name of the file */
 
-  FileEvent(inotify_event* event)
-    : wd(event->wd)
-    , mask(event->mask)
-    , cookie(event->cookie)
-    , filename(event->name)
-    , timestamp(std::chrono::steady_clock::now())
-  {
-  }
+  FileEvent(const inotify_event* const event);
+  ~FileEvent();
 
-  ~FileEvent() = default;
+  std::string getTimestamp() const;
 };
 
 }  // namespace inotify

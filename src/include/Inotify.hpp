@@ -32,14 +32,21 @@ class Inotify
 
  private:
   void runOnce();
-  void watchDirectory(const std::filesystem::path& path);
-  void addWatch(const std::filesystem::path& path);
   bool isIgnored(const std::filesystem::path& path) const;
-  void rewriteCache();
-  void invalidateSubdirectories(const std::filesystem::path& old_path);
+
+  bool watchDirectory(const std::filesystem::path& path);
+  void addWatch(const std::filesystem::path& path);
+  void rewriteCachedPaths(const std::string& old_path_prefix, const std::string& new_path_prefix);
+  void clearCache();
+  void zapSubdirectories(const std::filesystem::path& old_path);
+
+  void initialize();
+  void terminate() noexcept;
+
   ssize_t readEventsIntoBuffer();
   void readEventsFromBuffer(ssize_t length);
 
+  bool checkCacheConsistency(const FileEvent& event);
   void processFileEvent(const FileEvent& event);
   void processDirectoryEvent(const FileEvent& event);
 

@@ -14,12 +14,14 @@ set(SOURCES
     src/main.cpp
     src/Inotify.cpp
     src/Logger.cpp
+    src/FileEvent.cpp
 )
 
 set(HEADERS
     src/include/Inotify.hpp
     src/include/Logger.hpp
     src/include/FileEvent.hpp
+    src/include/InotifyError.hpp
 )
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
