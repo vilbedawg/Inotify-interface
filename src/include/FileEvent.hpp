@@ -15,8 +15,6 @@ struct FileEvent {
 
   FileEvent(const inotify_event* const event);
   ~FileEvent();
-
-  std::string getTimestamp() const;
 };
 
 }  // namespace inotify
