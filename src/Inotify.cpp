@@ -9,7 +9,8 @@
 
 namespace inotify {
 
-Inotify::Inotify(const std::filesystem::path &path)
+Inotify::Inotify(const std::filesystem::path &path, const std::vector<std::string> &ignored)
+  : _root(path), _ignored_dirs(ignored)
 {
   std::stringstream error_stream;
 
@@ -58,15 +59,7 @@ Inotify::Inotify(const std::filesystem::path &path)
   }
 
   // initialize by watching the specified directory
-  addWatch(path);
-  for (const auto &entry : std::filesystem::recursive_directory_iterator(path))
-  {
-    if (entry.is_directory())
-    {
-      addWatch(entry.path().string());
-    }
-  }
-
+  watchDirectory(path);
   _logger.logEvent("Watching directory: %s", path.c_str());
 }
 
@@ -103,9 +96,7 @@ void Inotify::runOnce()
 
     if (event.mask & (IN_DELETE_SELF | IN_MOVE_SELF))
     {
-      _logger.logEvent(
-          "Watched directory was deleted or moved: %s", _wd_cache.at(event.wd).c_str());
-      _wd_cache.erase(event.wd);
+      _logger.logEvent("Nothing to watch. Bye!");
       _stopped = true;
       return;
     }
@@ -124,53 +115,55 @@ void Inotify::runOnce()
 void Inotify::stop()
 {
   _stopped = true;
-  signalStop();
-}
 
-void Inotify::signalStop()
-{
   /* Write a signal to the eventfd to interrupt the epoll_wait call */
   uint64_t buffer = 1;
-  if (write(_event_fd, &buffer, sizeof(buffer)) == -1)
+  write(_event_fd, &buffer, sizeof(buffer));
+}
+
+bool Inotify::isIgnored(const std::filesystem::path &path) const
+{
+  for (const auto &ignored : _ignored_dirs)
   {
-    throw std::runtime_error("Failed to signal eventfd for stop");
+    if (path == ignored) return true;
+  }
+
+  return false;
+}
+
+void Inotify::watchDirectory(const std::filesystem::path &path)
+{
+  if (!std::filesystem::is_directory(path) || isIgnored(path)) return;
+
+  addWatch(path);
+  for (const auto &entry : std::filesystem::recursive_directory_iterator(path))
+  {
+    if (entry.is_directory() && !isIgnored(entry.path()))
+    {
+      addWatch(entry.path());
+    }
   }
 }
 
-int Inotify::addWatch(const std::filesystem::path &path)
+void Inotify::addWatch(const std::filesystem::path& path)
 {
-  std::stringstream error_stream;
-  if (!std::filesystem::exists(path))
-  {
-    error_stream << "Specified path does not exist: " << path;
-    throw std::invalid_argument(error_stream.str());
-  }
-
-  if (!std::filesystem::is_directory(path))
-  {
-    error_stream << "Specified path is not a directory: " << path;
-    throw std::invalid_argument(error_stream.str());
-  }
-
   // Watch for file creation, deletion, and modification events
-  int flags = IN_MODIFY | IN_CREATE | IN_MOVE | IN_DELETE;
+  int flags = IN_MODIFY | IN_CREATE | IN_MOVE | IN_DELETE | IN_DONT_FOLLOW;
   if (_wd_cache.empty())
   {
-    flags |= IN_MOVE_SELF | IN_DELETE_SELF | IN_ONLYDIR;
+    flags |= IN_MOVE_SELF | IN_DELETE_SELF;  // is this right?
   }
 
-  int wd = inotify_add_watch(
-      _inotify_fd, path.c_str(), flags | IN_DONT_FOLLOW);  // Do not follow symlinks
+  int wd = inotify_add_watch(_inotify_fd, path.c_str(), flags);
   if (wd == -1)
   {
+    std::stringstream error_stream;
     error_stream << "Failed to watch directory: " << path << strerror(errno);
     throw std::runtime_error(error_stream.str());
   }
 
   // Add the watch descriptor to the cache
   _wd_cache.insert(std::make_pair(wd, path));
-
-  return wd;
 }
 
 ssize_t Inotify::readEventsIntoBuffer()
@@ -192,8 +185,7 @@ ssize_t Inotify::readEventsIntoBuffer()
     // Check if the inotify fd was triggered
     if (_epoll_events[i].data.fd == _inotify_fd)
     {
-      length =
-          read(_inotify_fd, _event_buffer.data(), _event_buffer.size());  // Read events into buffer
+      length = read(_inotify_fd, _event_buffer.data(), _event_buffer.size());  // Read events into buffer
 
       if (length == -1)
       {
@@ -210,14 +202,73 @@ ssize_t Inotify::readEventsIntoBuffer()
 void Inotify::readEventsFromBuffer(ssize_t length)
 {
   uint8_t *event_buffer = _event_buffer.data();
-  ssize_t i = 0;
+  size_t i = 0;
   while (i < length)
   {
     struct inotify_event *event = (struct inotify_event *)&event_buffer[i];
 
-    _event_queue.push(FileEvent(event));
+    if (event->mask & IN_IGNORED)
+    {
+      // Watch was removed either explcitly or implicitly
+      // The watch descriptor might no longer be in the cache, but nonetheless we try to erase it
+      _wd_cache.erase(event->wd);
+    }
+    else 
+    {
+      _event_queue.push(FileEvent(event));
+    }
 
     i += EVENT_SIZE + event->len;
+  }
+}
+
+void Inotify::rewriteCache()
+{
+  for (auto it = _wd_cache.begin(); it != _wd_cache.end();)
+  {
+    int result = inotify_rm_watch(_inotify_fd, it->first);
+    if (result == -1)
+    {
+      std::stringstream error_stream;
+      error_stream << "Failed to remove watch: " << strerror(errno);
+      throw std::runtime_error(error_stream.str());
+    }
+    it = _wd_cache.erase(it);
+  }
+
+  watchDirectory(_root);
+  // if still empty for whatever reason after watching the root directory, then we are done
+  if (_wd_cache.empty())
+  {
+    stop();
+  }
+}
+
+void Inotify::invalidateSubdirectories(const std::filesystem::path &old_path)
+{
+  // Collect watch descriptors to be removed
+  std::vector<int> to_remove;
+
+  for (const auto &[wd, path] : _wd_cache)
+  {
+    // Check if the path is a subdirectory of old_path
+    if (path.string().rfind(old_path.string(), 0) == 0)
+    {
+      to_remove.push_back(wd);
+    }
+  }
+
+  // Remove watches for the affected subdirectories
+  for (int wd : to_remove)
+  {
+    _wd_cache.erase(wd);
+    int result = inotify_rm_watch(_inotify_fd, wd);
+    if (result == -1)
+    {
+      std::stringstream error_stream;
+      error_stream << "Failed to remove watch: " << strerror(errno);
+      throw std::runtime_error(error_stream.str());
+    }
   }
 }
 
@@ -226,32 +277,18 @@ void Inotify::processDirectoryEvent(const FileEvent &event)
   const std::filesystem::path &dir_path = _wd_cache.at(event.wd);
   const std::filesystem::path &full_path = dir_path / event.filename;
 
-  if (event.mask & IN_IGNORED)
+  if (event.mask & IN_DELETE)
   {
-    /* Watch was removed explicitly or automatically
-     * clear the corresponding item from the cache. */
-    _wd_cache.erase(event.wd);
+    _logger.logEvent("Deleted directory: %s", full_path.c_str());
   }
-
   else if (event.mask & (IN_CREATE | IN_MOVED_TO))
   {
     if (event.mask & IN_CREATE)
-    {
       _logger.logEvent("Created directory: %s", full_path.c_str());
-    }
     else
-    {
       _logger.logEvent("Moved into watch directory: %s", full_path.c_str());
-    }
 
-    addWatch(full_path);
-    for (const auto &entry : std::filesystem::recursive_directory_iterator(full_path))
-    {
-      if (entry.is_directory())
-      {
-        addWatch(entry.path());
-      }
-    }
+    watchDirectory(full_path);
   }
   else if (event.mask & IN_MOVED_FROM)
   {
@@ -259,8 +296,7 @@ void Inotify::processDirectoryEvent(const FileEvent &event)
     if (_event_queue.empty())
     {
       _logger.logEvent("Moved out of watch directory: %s", full_path.c_str());
-      _wd_cache.erase(event.wd);
-      // remove all subdirectories from the cache
+      invalidateSubdirectories(full_path);
     }
     else
     {
@@ -272,16 +308,15 @@ void Inotify::processDirectoryEvent(const FileEvent &event)
         const std::filesystem::path &next_full_path = next_dir_path / next_event.filename;
         if (dir_path == next_dir_path)
         {
-          _logger.logEvent(
-              "Renamed directory: %s -> %s", full_path.c_str(), next_full_path.c_str());
+          _logger.logEvent("Renamed directory: %s -> %s", full_path.c_str(), next_full_path.c_str());
         }
         else
         {
           _logger.logEvent("Moved directory: %s -> %s", full_path.c_str(), next_full_path.c_str());
         }
 
-        // rewrite all subdirectories
-        // all subdirectories in the wd_cache start with the full_path
+        invalidateSubdirectories(full_path);
+        watchDirectory(next_full_path);
       }
     }
   }
@@ -292,28 +327,14 @@ void Inotify::processFileEvent(const FileEvent &event)
   const std::filesystem::path &dir_path = _wd_cache.at(event.wd);
   const std::filesystem::path &full_path = dir_path / event.filename;
 
-  if (event.mask & IN_IGNORED)
-  {
-    /* Watch was removed explicitly or automatically
-     * clear the corresponding item from the cache. */
-    _wd_cache.erase(event.wd);
-  }
-  else if (event.mask & IN_CREATE)
-  {
+  if (event.mask & IN_CREATE)
     _logger.logEvent("Created file: %s", full_path.c_str());
-  }
   else if (event.mask & IN_DELETE)
-  {
     _logger.logEvent("Deleted file: %s", full_path.c_str());
-  }
   else if (event.mask & IN_MODIFY)
-  {
     _logger.logEvent("Modified file: %s", full_path.c_str());
-  }
   else if (event.mask & IN_MOVED_TO)
-  {
     _logger.logEvent("Moved file into watch directory: %s", full_path.c_str());
-  }
   else if (event.mask & IN_MOVED_FROM)
   {
     // We assume that the next event is the corresponding IN_MOVED_TO event

@@ -27,7 +27,7 @@ BraceWrapping:
 # Ensure pointer/reference alignment with the type (e.g. int *x)
 PointerAlignment: Left
 # Limit the column width for breaking
-ColumnLimit: 100
+ColumnLimit: 120
 # Formatting for include lines
 SortIncludes: false
 ---
