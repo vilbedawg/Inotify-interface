@@ -9,11 +9,11 @@ namespace inotify {
 
 void Logger::logEvent(const char* format, ...)
 {
+  std::cout << '[' << getTimestamp() << "] ";
   va_list args;
   va_start(args, format);
   vprintf(format, args);
   va_end(args);
-  std::cout << ' ' << '[' << getTimestamp() << ']';
   std::cout << std::endl;
 }
 
