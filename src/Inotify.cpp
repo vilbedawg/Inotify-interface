@@ -125,7 +125,7 @@ bool Inotify::watchDirectory(const std::filesystem::path &path)
   std::stack<std::filesystem::path> dirs;
   if (!std::filesystem::is_directory(path))
   {
-    _logger.logError("Failed to watch directory: %s", path.c_str());
+    _logger.logEvent("Failed to watch directory: %s", path.c_str());
     return false;
   }
 

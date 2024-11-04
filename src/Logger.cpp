@@ -17,16 +17,6 @@ void Logger::logEvent(const char* format, ...)
   std::cout << std::endl;
 }
 
-void Logger::logError(const char* format, ...)
-{
-  va_list args;
-  va_start(args, format);
-  vfprintf(stderr, format, args);
-  va_end(args);
-  std::cerr << ' ' << '[' << getTimestamp() << ']';
-  std::cerr << std::endl;
-}
-
 std::string Logger::getTimestamp() const
 {
   // Get the current time as system time
