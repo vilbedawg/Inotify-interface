@@ -72,6 +72,7 @@ class Inotify
   std::array<uint8_t, EVENT_BUFFER_LEN> _event_buffer;      /* Buffer to store inotify events */
   std::queue<FileEvent> _event_queue;                       /* Queue to store inotify events */
   std::atomic<bool> _stopped;                               /* Flag to stop the inotify instance */
+  bool _should_check_cache;                                 /* Flag to check cache consistency */
   Logger _logger;                                           /* For logging events */
 };
 

@@ -21,7 +21,7 @@ namespace inotify {
  * @throws std::invalid_argument if the root directory could not be watched.
  */
 Inotify::Inotify(const std::filesystem::path &path, const std::vector<std::string> &ignored)
-  : _root(path), _ignored_dirs(ignored), _logger{}
+  : _root(path), _ignored_dirs(ignored), _logger{}, _should_check_cache{false}
 {
   initialize();
   if (!watchDirectory(path)) throw std::invalid_argument("Failed to watch directory: " + path.string());
@@ -198,6 +198,8 @@ int Inotify::addWatch(const std::filesystem::path &path)
  */
 bool Inotify::checkCacheConsistency(const FileEvent &event)
 {
+  _should_check_cache = false;
+
   // Check whether the watch descriptor is in the cache
   if (_wd_cache.find(event.wd) == _wd_cache.end())
   {
@@ -246,7 +248,7 @@ void Inotify::runOnce()
       return;
     }
 
-    if (!checkCacheConsistency(event)) return;
+    if (_should_check_cache && !checkCacheConsistency(event)) return;
 
     if (event.mask & IN_ISDIR)
       processDirectoryEvent(event);
@@ -335,10 +337,19 @@ void Inotify::rewriteCachedPaths(const std::string &old_path_prefix, const std::
 {
   for (auto &[wd, path] : _wd_cache)
   {
-    if (path.string().rfind(old_path_prefix, 0) == 0)  // If the path starts with the old path prefix
+    const std::string path_str = path.string();
+
+    // Check if the path starts with the old path prefix
+    if (path_str.rfind(old_path_prefix, 0) == 0)
     {
-      std::string new_path_suffix = path.string().substr(old_path_prefix.size());  // Get the suffix
-      path = new_path_prefix + std::move(new_path_suffix);                         // Replace the prefix
+      // Ensure the prefix is followed by a separator or ends there (indicating it's a full directory match)
+      if (path_str.size() == old_path_prefix.size() ||
+          path_str[old_path_prefix.size()] == std::filesystem::path::preferred_separator)
+      {
+        // Get the suffix and rewrite the path
+        std::string old_path_suffix = path_str.substr(old_path_prefix.size());
+        path = new_path_prefix + std::move(old_path_suffix);
+      }
     }
   }
 }
@@ -379,6 +390,7 @@ void Inotify::processDirectoryEvent(const FileEvent &event)
   const std::filesystem::path &dir_path = _wd_cache.at(event.wd);
   // The path of the directory that the event is about
   const std::filesystem::path &full_path = dir_path / event.filename;
+  _should_check_cache = true; // Set the flag to check cache consistency on the next iteration
 
   if (event.mask & IN_DELETE)
   {
