@@ -1,15 +1,25 @@
+
 #include "include/Inotify.hpp"
-#include "include/FileEvent.hpp"
-#include "include/InotifyError.hpp"
-#include <cstring>
-#include <sstream>
-#include <sys/inotify.h>
+
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/inotify.h>
 #include <unistd.h>
+
+#include <cstring>
+#include <stack>
+
+#include "include/FileEvent.hpp"
+#include "include/InotifyError.hpp"
 
 namespace inotify {
 
+/**
+ * Constructor for initializing the Inotify watcher with a root path and a list of directories to ignore.
+ * @param path The root directory to monitor for file system changes.
+ * @param ignored_dirs List of directory names to be excluded from monitoring.
+ * @throws std::invalid_argument if the root directory could not be watched.
+ */
 Inotify::Inotify(const std::filesystem::path &path, const std::vector<std::string> &ignored)
   : _root(path), _ignored_dirs(ignored), _logger{}
 {
@@ -17,8 +27,14 @@ Inotify::Inotify(const std::filesystem::path &path, const std::vector<std::strin
   if (!watchDirectory(path)) throw std::invalid_argument("Failed to watch directory: " + path.string());
 }
 
+/**
+ * Destructor that cleans up resources related to inotify and epoll file descriptors.
+ */
 Inotify::~Inotify() { terminate(); }
 
+/**
+ * Initializes the inotify instance and sets up epoll for handling events.
+ */
 void Inotify::initialize()
 {
   // Initialize the inotify instance
@@ -48,6 +64,9 @@ void Inotify::initialize()
     throw InotifyError("Failed to add event file descriptor to epoll");
 }
 
+/**
+ * Gracefully terminates the inotify instance, closing all file descriptors.
+ */
 void Inotify::terminate() noexcept
 {
   epoll_ctl(_epoll_fd, EPOLL_CTL_DEL, _inotify_fd, 0);
@@ -57,6 +76,9 @@ void Inotify::terminate() noexcept
   close(_event_fd);
 }
 
+/**
+ * Starts the inotify watcher, processing file events in an ongoing loop.
+ */
 void Inotify::run()
 {
   _stopped = false;
@@ -66,6 +88,9 @@ void Inotify::run()
   }
 }
 
+/**
+ * Stops the inotify watcher by setting the _stopped flag and writing a signal to the eventfd.
+ */
 void Inotify::stop()
 {
   _stopped = true;
@@ -75,6 +100,11 @@ void Inotify::stop()
   write(_event_fd, &buffer, sizeof(buffer));
 }
 
+/**
+ * Checks if a specified directory is in the ignored directories list.
+ * @param path The directory path to check.
+ * @return True if the path is in the ignored list, false otherwise.
+ */
 bool Inotify::isIgnored(const std::filesystem::path &path) const
 {
   for (const auto &ignored : _ignored_dirs)
@@ -85,55 +115,87 @@ bool Inotify::isIgnored(const std::filesystem::path &path) const
   return false;
 }
 
+/**
+ * Adds a directory and all of it's subdirectories to the inotify watch list while doing some sanity checks.
+ * @param path The directory path to monitor.
+ * @return True if successfully added, false otherwise.
+ */
 bool Inotify::watchDirectory(const std::filesystem::path &path)
 {
+  std::stack<std::filesystem::path> dirs;
   if (!std::filesystem::is_directory(path))
   {
     _logger.logError("Failed to watch directory: %s", path.c_str());
     return false;
   }
 
+  // Check if already watched
+  for (const auto &[_, dir] : _wd_cache)
+  {
+    if (dir == path) return true;
+  }
+
+  // Check if the directory is in the ignored list
   if (isIgnored(path)) return true;
 
-  addWatch(path);
-  for (const auto &entry : std::filesystem::recursive_directory_iterator(path))
+  dirs.push(path);
+
+  while (!dirs.empty())
   {
-    if (entry.is_directory() && !isIgnored(entry.path()))
+    std::filesystem::path dir = dirs.top();
+    dirs.pop();
+    addWatch(dir);
+
+    /* Using recursive_directory_iterator doesn't allow to properly
+     * ignore the directories since it traverses into the subdirectories even if we ignore them
+     * So we use directory_iterator and manually push the subdirectories onto the stack
+     */
+    for (const auto &entry : std::filesystem::directory_iterator(dir))
     {
-      addWatch(entry.path());
+      if (entry.is_directory() && !isIgnored(entry.path()))
+      {
+        dirs.push(entry.path());
+      }
     }
   }
 
   return true;
 }
 
+/**
+ * Registers a specific directory path with inotify and adds it to the watch descriptor cache.
+ * @param path The directory path to add to the inotify watch list.
+ */
 void Inotify::addWatch(const std::filesystem::path &path)
 {
-  // Watch for file creation, deletion, and modification events
+  // Watch for file creation, deletion, and modification events, and don't follow symbolic links
   int flags = IN_MODIFY | IN_CREATE | IN_MOVE | IN_DELETE | IN_DONT_FOLLOW;
   if (_wd_cache.empty())
   {
-    flags |= IN_MOVE_SELF | IN_DELETE_SELF;
+    flags |= IN_MOVE_SELF | IN_DELETE_SELF;  // Watch for the root directory being moved or deleted
   }
 
   int wd = inotify_add_watch(_inotify_fd, path.c_str(), flags);
-  if (wd == -1)
-  {
-    std::stringstream error_stream;
-    error_stream << "Failed to watch directory: " << path << strerror(errno);
-    throw std::runtime_error(error_stream.str());
-  }
+  if (wd == -1) throw InotifyError("Failed to add watch");
 
   // Add the watch descriptor to the cache
   _wd_cache.insert(std::make_pair(wd, path));
 }
 
+/**
+ * Verifies that an event corresponds to the current state of the watch cache.
+ * If the cache is inconsistent, it will attempt to recover by reinitializing the inotify instance and rewatching the
+ * root directory. It will also clear the current event queue and event buffer.
+ * @param event The file event to check for consistency.
+ * @return True if the event matches the cache, false otherwise.
+ * @throws InotifyError if the cache could not be recovered.
+ */
 bool Inotify::checkCacheConsistency(const FileEvent &event)
 {
-  // Cache consistency check
+  // Check whether the watch descriptor is in the cache
   if (_wd_cache.find(event.wd) == _wd_cache.end())
   {
-    // cache reached inconsistent state; try to recover
+    // Cache reached inconsistent state; try to recover
     clearCache();  // remove all watches
     terminate();   // close all file descriptors
     initialize();  // reinitialize inotify and epoll
@@ -154,6 +216,9 @@ bool Inotify::checkCacheConsistency(const FileEvent &event)
   return true;
 }
 
+/**
+ * Processes a single iteration of file events, checking for new events and updating as needed.
+ */
 void Inotify::runOnce()
 {
   while (_event_queue.empty() && !_stopped)
@@ -167,6 +232,7 @@ void Inotify::runOnce()
     FileEvent event = _event_queue.front();
     _event_queue.pop();
 
+    // If the root directory that is watched is deleted or moved, stop watching
     if (event.mask & (IN_DELETE_SELF | IN_MOVE_SELF))
     {
       _stopped = true;
@@ -183,6 +249,11 @@ void Inotify::runOnce()
   }
 }
 
+/**
+ * Reads inotify events into the event buffer.
+ * @return The number of bytes read into the buffer.
+ * @throws InotifyError if the events could not be read.
+ */
 ssize_t Inotify::readEventsIntoBuffer()
 {
   int triggered_events = epoll_wait(_epoll_fd, _epoll_events, MAX_EVENTS, -1);
@@ -194,28 +265,23 @@ ssize_t Inotify::readEventsIntoBuffer()
   for (int i = 0; i < triggered_events; ++i)
   {
     // Check if the event fd was triggered by the stop signal
-    if (_epoll_events[i].data.fd == _event_fd)
-    {
-      break;  // Stop if stop signal received
-    }
+    if (_epoll_events[i].data.fd == _event_fd) break;  // Stop if stop signal received
 
     // Check if the inotify fd was triggered
     if (_epoll_events[i].data.fd == _inotify_fd)
     {
       length = read(_inotify_fd, _event_buffer.data(), _event_buffer.size());  // Read events into buffer
-
-      if (length == -1)
-      {
-        std::stringstream error_stream;
-        error_stream << "Failed to read events: " << strerror(errno);
-        throw std::runtime_error(error_stream.str());
-      }
+      if (length == -1) throw InotifyError("Failed to read events from inotify");
     }
   }
 
   return length;
 }
 
+/**
+ * Reads inotify events from the event buffer and pushes them onto the event queue.
+ * @param length The number of bytes to read from the buffer.
+ */
 void Inotify::readEventsFromBuffer(ssize_t length)
 {
   uint8_t *event_buffer = _event_buffer.data();
@@ -239,33 +305,43 @@ void Inotify::readEventsFromBuffer(ssize_t length)
   }
 }
 
+/**
+ * Clears the watch descriptor cache and removes all watches.
+ * @throws InotifyError if a watch descriptor could not be removed.
+ */
 void Inotify::clearCache()
 {
   for (auto it = _wd_cache.begin(); it != _wd_cache.end();)
   {
     int result = inotify_rm_watch(_inotify_fd, it->first);
-    if (result == -1)
-    {
-      std::stringstream error_stream;
-      error_stream << "Failed to remove watch: " << strerror(errno);
-      throw std::runtime_error(error_stream.str());
-    }
+    if (result == -1) throw InotifyError("Failed to remove watch");
     it = _wd_cache.erase(it);
   }
 }
 
+/**
+ * The directory oldPathPrefix/oldName was renamed to newPathPrefix/newName.
+ * Fix up cache entries for old_path_prefix/name and all of its subdirectories to reflect the change.
+ * @param old_path_prefix The old path prefix to replace.
+ * @param new_path_prefix The new path prefix to replace with.
+ */
 void Inotify::rewriteCachedPaths(const std::string &old_path_prefix, const std::string &new_path_prefix)
 {
   for (auto &[wd, path] : _wd_cache)
   {
-    if (path.string().rfind(old_path_prefix, 0) == 0)
+    if (path.string().rfind(old_path_prefix, 0) == 0)  // If the path starts with the old path prefix
     {
-      std::string new_path_suffix = path.string().substr(old_path_prefix.size());
-      path = new_path_prefix + new_path_suffix;
+      std::string new_path_suffix = path.string().substr(old_path_prefix.size());  // Get the suffix
+      path = new_path_prefix + std::move(new_path_suffix);                         // Replace the prefix
     }
   }
 }
 
+/* Zap watches and cache entries for directory 'old_path' and all of its
+ * subdirectories.
+ * @param old_path The path of the directory to remove watches for.
+ * @throws InotifyError if the watch descriptor could not be removed.
+ */
 void Inotify::zapSubdirectories(const std::filesystem::path &old_path)
 {
   // Collect watch descriptors to be removed
@@ -285,15 +361,13 @@ void Inotify::zapSubdirectories(const std::filesystem::path &old_path)
   {
     _wd_cache.erase(wd);
     int result = inotify_rm_watch(_inotify_fd, wd);
-    if (result == -1)
-    {
-      std::stringstream error_stream;
-      error_stream << "Failed to remove watch: " << strerror(errno);
-      throw std::runtime_error(error_stream.str());
-    }
+    if (result == -1) throw InotifyError("Failed to remove watch");
   }
 }
 
+/* Processes an event that occurred against a directory.
+ * @param event The event to process.
+ */
 void Inotify::processDirectoryEvent(const FileEvent &event)
 {
   // The path of the directory that the event occurred in
@@ -347,37 +421,47 @@ void Inotify::processDirectoryEvent(const FileEvent &event)
   }
 }
 
+/* Processes an event that occurred against a file.
+ * @param event The event to process.
+ */
 void Inotify::processFileEvent(const FileEvent &event)
 {
+  // The path of the directory that the event occurred in
   const std::filesystem::path &dir_path = _wd_cache.at(event.wd);
+  // The path of the file that the event is about
   const std::filesystem::path &full_path = dir_path / event.filename;
 
-  if (event.mask & IN_CREATE)
-    _logger.logEvent("Created file: %s", full_path.c_str());
+  // A file was created or renamed into the watch directory
+  if (event.mask & (IN_CREATE | IN_MOVED_TO)) _logger.logEvent("Created file: %s", full_path.c_str());
+  // A file was deleted
   else if (event.mask & IN_DELETE)
     _logger.logEvent("Deleted file: %s", full_path.c_str());
+  // A file was modified
   else if (event.mask & IN_MODIFY)
     _logger.logEvent("Modified file: %s", full_path.c_str());
-  else if (event.mask & IN_MOVED_TO)
-    _logger.logEvent("Moved file into watch directory: %s", full_path.c_str());
+  // A file was renamed or moved from the watch directory
   else if (event.mask & IN_MOVED_FROM)
   {
-    // We assume that the next event is the corresponding IN_MOVED_TO event
+    // If no more events in the queue, we assume there will be no corresponding IN_MOVED_TO event
     if (_event_queue.empty())
     {
       _logger.logEvent("Moved file out of watch directory: %s", full_path.c_str());
     }
-    else
+    else  // We assume that the next event is the corresponding IN_MOVED_TO event
     {
       const FileEvent next_event = _event_queue.front();
       _event_queue.pop();
+
       if (next_event.mask & IN_MOVED_TO && next_event.cookie == event.cookie)
       {
+        // The path of the directory that the next event occurred in
         const std::filesystem::path &next_dir_path = _wd_cache.at(next_event.wd);
+        // The path of the file that the next event is about
         const std::filesystem::path &next_full_path = next_dir_path / next_event.filename;
-        if (dir_path == next_dir_path)
+
+        if (dir_path == next_dir_path)  // If the directories are the same, it was a rename
           _logger.logEvent("Renamed file: %s -> %s", full_path.c_str(), next_full_path.c_str());
-        else
+        else  // otherwise it was a move
           _logger.logEvent("Moved file: %s -> %s", full_path.c_str(), next_full_path.c_str());
       }
     }

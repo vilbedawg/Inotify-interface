@@ -1,10 +1,10 @@
 #ifndef INOTIFYERROR_HPP
 #define INOTIFYERROR_HPP
 
+#include <cerrno>
+#include <cstring>
 #include <stdexcept>
 #include <string>
-#include <cstring>
-#include <cerrno>
 
 namespace inotify {
 

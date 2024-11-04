@@ -3,11 +3,13 @@
 
 #include <sys/epoll.h>
 #include <sys/inotify.h>
+
 #include <atomic>
 #include <filesystem>
-#include <unordered_map>
 #include <queue>
+#include <unordered_map>
 #include <vector>
+
 #include "FileEvent.hpp"
 #include "Logger.hpp"
 
@@ -27,28 +29,35 @@ class Inotify
   Inotify(const std::filesystem::path& path, const std::vector<std::string>& ignored_dirs);
   ~Inotify();
 
-  void run();
-  void stop();
+  void run();  /* Starts the event-loop */
+  void stop(); /* Stops the event-loop */
 
  private:
-  void runOnce();
-  bool isIgnored(const std::filesystem::path& path) const;
+  void initialize();         /* Initialize inotify and epoll */
+  void terminate() noexcept; /* Gracefully terminate the inotify instance */
+  void runOnce();            /* Run a single iteration of the event-processing loop */
 
-  bool watchDirectory(const std::filesystem::path& path);
-  void addWatch(const std::filesystem::path& path);
-  void rewriteCachedPaths(const std::string& old_path_prefix, const std::string& new_path_prefix);
-  void clearCache();
-  void zapSubdirectories(const std::filesystem::path& old_path);
+  /* Directory and path managment */
+  bool watchDirectory(
+      const std::filesystem::path& path);           /* Add a directory and all of its subdirectories to be watched */
+  void addWatch(const std::filesystem::path& path); /* Register a directory path with inotify */
+  bool isIgnored(const std::filesystem::path& path) const; /* Check if a directory is in the ignore list */
+  void zapSubdirectories(const std::filesystem::path&
+          old_path); /* Remove all subdirectories from the watch descriptor cache under the given path */
 
-  void initialize();
-  void terminate() noexcept;
+  /* Cache mangament */
+  void clearCache(); /* Clear the cache */
+  void rewriteCachedPaths(const std::string& old_path_prefix,
+      const std::string& new_path_prefix); /* Update cached paths */
 
-  ssize_t readEventsIntoBuffer();
-  void readEventsFromBuffer(ssize_t length);
+  /* Event handling */
+  ssize_t readEventsIntoBuffer();            /* Reads inotify events into the _event_buffer */
+  void readEventsFromBuffer(ssize_t length); /* Reads inotify events from the _event_buffer to the _event_queue */
 
-  bool checkCacheConsistency(const FileEvent& event);
-  void processFileEvent(const FileEvent& event);
-  void processDirectoryEvent(const FileEvent& event);
+  /* Event processing */
+  bool checkCacheConsistency(const FileEvent& event); /* Verify cache consistency against the given event */
+  void processFileEvent(const FileEvent& event);      /* Handle file related events */
+  void processDirectoryEvent(const FileEvent& event); /* Handle directory related events */
 
  private:
   const std::filesystem::path _root;                        /* Root path to watch */

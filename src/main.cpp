@@ -1,8 +1,9 @@
-#include "include/Inotify.hpp"
-#include <iostream>
-#include <thread>
 #include <csignal>
 #include <filesystem>
+#include <iostream>
+#include <thread>
+
+#include "include/Inotify.hpp"
 
 // Global state variables
 bool running = true;
@@ -99,4 +100,3 @@ int main(int argc, char* argv[])
   std::cout << "Bye!" << std::endl;
   return had_error ? EXIT_FAILURE : EXIT_SUCCESS;
 }
-

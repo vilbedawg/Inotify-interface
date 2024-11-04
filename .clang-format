@@ -29,6 +29,6 @@ PointerAlignment: Left
 # Limit the column width for breaking
 ColumnLimit: 120
 # Formatting for include lines
-SortIncludes: false
+SortIncludes: true
 ---
 

@@ -1,5 +1,4 @@
 #include "include/FileEvent.hpp"
-#include <iomanip>
 
 namespace inotify {
 

@@ -1,8 +1,9 @@
 #include "include/Logger.hpp"
+
+#include <chrono>
 #include <cstdarg>
 #include <iomanip>
 #include <iostream>
-#include <chrono>
 
 namespace inotify {
 

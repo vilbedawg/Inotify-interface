@@ -2,6 +2,7 @@
 #define FILE_EVENT_HPP
 
 #include <sys/inotify.h>
+
 #include <cstdint>
 #include <string>
 
