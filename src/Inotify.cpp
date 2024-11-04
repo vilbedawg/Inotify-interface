@@ -136,9 +136,9 @@ bool Inotify::watchDirectory(const std::filesystem::path &path)
   }
 
   // Check if the directory is in the ignored list
-  if (isIgnored(path)) return true;
+  if (isIgnored(path.filename())) return true;
 
-  dirs.push(path.filename());
+  dirs.push(path);
 
   while (!dirs.empty())
   {
