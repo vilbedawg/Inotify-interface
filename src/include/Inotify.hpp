@@ -41,7 +41,7 @@ class Inotify
   bool watchDirectory(
       const std::filesystem::path& path);           /* Add a directory and all of its subdirectories to be watched */
   void addWatch(const std::filesystem::path& path); /* Register a directory path with inotify */
-  bool isIgnored(const std::filesystem::path& path) const; /* Check if a directory is in the ignore list */
+  bool isIgnored(const std::string& path_name) const; /* Check if a directory is in the ignore list */
   void zapSubdirectories(const std::filesystem::path&
           old_path); /* Remove all subdirectories from the watch descriptor cache under the given path */
 

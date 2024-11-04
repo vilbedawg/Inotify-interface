@@ -43,7 +43,8 @@ bool parseArguments(int argc, char* argv[], std::filesystem::path& path, std::ve
   for (int i = 2; i < argc; ++i)
   {
     if (!isValidDirectory(argv[i])) return false;
-    ignored_dirs.push_back(argv[i]);
+    std::filesystem::path dir(argv[i]);
+    ignored_dirs.push_back(dir.filename());
   }
   return true;
 }

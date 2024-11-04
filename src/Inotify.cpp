@@ -105,11 +105,11 @@ void Inotify::stop()
  * @param path The directory path to check.
  * @return True if the path is in the ignored list, false otherwise.
  */
-bool Inotify::isIgnored(const std::filesystem::path &path) const
+bool Inotify::isIgnored(const std::string &path_name) const
 {
   for (const auto &ignored : _ignored_dirs)
   {
-    if (path == ignored) return true;
+    if (path_name == ignored) return true;
   }
 
   return false;
@@ -138,7 +138,7 @@ bool Inotify::watchDirectory(const std::filesystem::path &path)
   // Check if the directory is in the ignored list
   if (isIgnored(path)) return true;
 
-  dirs.push(path);
+  dirs.push(path.filename());
 
   while (!dirs.empty())
   {
@@ -152,7 +152,7 @@ bool Inotify::watchDirectory(const std::filesystem::path &path)
      */
     for (const auto &entry : std::filesystem::directory_iterator(dir))
     {
-      if (entry.is_directory() && !isIgnored(entry.path()))
+      if (entry.is_directory() && !isIgnored(entry.path().filename()))
       {
         dirs.push(entry.path());
       }
