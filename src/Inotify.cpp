@@ -144,7 +144,7 @@ bool Inotify::watchDirectory(const std::filesystem::path &path)
   {
     std::filesystem::path dir = dirs.top();
     dirs.pop();
-    addWatch(dir);
+    if (addWatch(dir) == -1) return false;
 
     /* Using recursive_directory_iterator doesn't allow to properly
      * ignore the directories since it traverses into the subdirectories even if we ignore them
@@ -165,8 +165,9 @@ bool Inotify::watchDirectory(const std::filesystem::path &path)
 /**
  * Registers a specific directory path with inotify and adds it to the watch descriptor cache.
  * @param path The directory path to add to the inotify watch list.
+ * @return The watch descriptor for the directory, or -1 if the watch could not be added.
  */
-void Inotify::addWatch(const std::filesystem::path &path)
+int Inotify::addWatch(const std::filesystem::path &path)
 {
   // Watch for file creation, deletion, and modification events, and don't follow symbolic links
   int flags = IN_MODIFY | IN_CREATE | IN_MOVE | IN_DELETE | IN_DONT_FOLLOW;
@@ -176,10 +177,15 @@ void Inotify::addWatch(const std::filesystem::path &path)
   }
 
   int wd = inotify_add_watch(_inotify_fd, path.c_str(), flags);
-  if (wd == -1) throw InotifyError("Failed to add watch");
+  if (wd == -1)
+  {
+    _logger.logEvent("Failed to add watch for directory: %s", path.c_str());
+    return -1;
+  }
 
   // Add the watch descriptor to the cache
   _wd_cache.insert(std::make_pair(wd, path));
+  return wd;
 }
 
 /**
@@ -290,13 +296,14 @@ void Inotify::readEventsFromBuffer(ssize_t length)
   {
     struct inotify_event *event = (struct inotify_event *)&event_buffer[i];
 
-    if (event->mask & IN_IGNORED)
-    {
-      // Watch was removed either explcitly or implicitly
-      // The watch descriptor might no longer be in the cache, but nonetheless we try to erase it
-      _wd_cache.erase(event->wd);
-    }
-    else
+    /*
+     * In cases when the mask is set to IN_IGNORED, it means that the watch descriptor was removed either explicitly or
+     * implicitly. Since we are manually handling the removal of watch descriptors, we need to ignore these events to
+     * prevent cache inconsistencies.
+     *
+     * So we only push the event onto the queue if the mask does not contain IN_IGNORED.
+     */
+    if (!(event->mask & IN_IGNORED))
     {
       _event_queue.push(FileEvent(event));
     }
@@ -313,8 +320,7 @@ void Inotify::clearCache()
 {
   for (auto it = _wd_cache.begin(); it != _wd_cache.end();)
   {
-    int result = inotify_rm_watch(_inotify_fd, it->first);
-    if (result == -1) throw InotifyError("Failed to remove watch");
+    inotify_rm_watch(_inotify_fd, it->first);
     it = _wd_cache.erase(it);
   }
 }
@@ -360,8 +366,7 @@ void Inotify::zapSubdirectories(const std::filesystem::path &old_path)
   for (int wd : to_remove)
   {
     _wd_cache.erase(wd);
-    int result = inotify_rm_watch(_inotify_fd, wd);
-    if (result == -1) throw InotifyError("Failed to remove watch");
+    inotify_rm_watch(_inotify_fd, wd);
   }
 }
 
@@ -378,7 +383,7 @@ void Inotify::processDirectoryEvent(const FileEvent &event)
   if (event.mask & IN_DELETE)
   {
     _logger.logEvent("Deleted directory: %s", full_path.c_str());
-    // No need to handle subdirectories since they will be implicitly removed via IN_IGNORED events
+    zapSubdirectories(full_path);
   }
   // A new subdirectory was created, or a subdirectory was renamed into the watch directory
   else if (event.mask & (IN_CREATE | IN_MOVED_TO))
