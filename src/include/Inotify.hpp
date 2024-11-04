@@ -36,26 +36,26 @@ class Inotify
   void initialize();         /* Initialize inotify and epoll */
   void terminate() noexcept; /* Gracefully terminate the inotify instance */
   void runOnce();            /* Run a single iteration of the event-processing loop */
+  void reinitialize();       /* Reinitialize inotify and epoll, and try to rewrite the cache from scracth */
 
   /* Directory and path managment */
   bool watchDirectory(
       const std::filesystem::path& path);             /* Add a directory and all of its subdirectories to be watched */
   int addWatch(const std::filesystem::path& path);    /* Register a directory path with inotify */
   bool isIgnored(const std::string& path_name) const; /* Check if a directory is in the ignore list */
-  void zapSubdirectories(const std::filesystem::path&
+  int zapSubdirectories(const std::filesystem::path&
           old_path); /* Remove all subdirectories from the watch descriptor cache under the given path */
 
   /* Cache mangament */
-  void clearCache(); /* Clear the cache */
   void rewriteCachedPaths(const std::string& old_path_prefix,
-      const std::string& new_path_prefix); /* Update cached paths */
+      const std::string& new_path_prefix);       /* Update cached paths */
+  int findWd(const std::filesystem::path& path); /* Find the watch descriptor for the given path */
 
   /* Event handling */
   ssize_t readEventsIntoBuffer();            /* Reads inotify events into the _event_buffer */
   void readEventsFromBuffer(ssize_t length); /* Reads inotify events from the _event_buffer to the _event_queue */
 
   /* Event processing */
-  bool checkCacheConsistency(const FileEvent& event); /* Verify cache consistency against the given event */
   void processFileEvent(const FileEvent& event);      /* Handle file related events */
   void processDirectoryEvent(const FileEvent& event); /* Handle directory related events */
 
@@ -72,7 +72,6 @@ class Inotify
   std::array<uint8_t, EVENT_BUFFER_LEN> _event_buffer;      /* Buffer to store inotify events */
   std::queue<FileEvent> _event_queue;                       /* Queue to store inotify events */
   std::atomic<bool> _stopped;                               /* Flag to stop the inotify instance */
-  bool _should_check_cache;                                 /* Flag to check cache consistency */
   Logger _logger;                                           /* For logging events */
 };
 
