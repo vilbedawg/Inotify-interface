@@ -39,7 +39,7 @@ class Inotify
   void reinitialize();       /* Reinitialize inotify and epoll, and try to rewrite the cache from scracth */
 
   /* Directory and path managment */
-  bool watchDirectory(
+  int watchDirectory(
       const std::filesystem::path& path);             /* Add a directory and all of its subdirectories to be watched */
   int addWatch(const std::filesystem::path& path);    /* Register a directory path with inotify */
   bool isIgnored(const std::string& path_name) const; /* Check if a directory is in the ignore list */

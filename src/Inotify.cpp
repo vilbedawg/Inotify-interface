@@ -21,10 +21,14 @@ namespace inotify {
  * @throws std::invalid_argument if the root directory could not be watched.
  */
 Inotify::Inotify(const std::filesystem::path &path, const std::vector<std::string> &ignored)
-  : _root(path), _ignored_dirs(ignored), _logger{}
+  : _root(path), _ignored_patterns(ignored), _logger{}
 {
   initialize();
-  if (!watchDirectory(path)) throw std::invalid_argument("Failed to watch directory: " + path.string());
+  int dir_watch_cnt = watchDirectory(path);
+  if (dir_watch_cnt == -1)
+    throw InotifyError("Failed to watch root directory " + path.string());
+  else if (dir_watch_cnt == 0)
+    throw std::invalid_argument("Root directory is in the ignored list: " + path.string());
 }
 
 /**
@@ -119,7 +123,7 @@ void Inotify::reinitialize()
 
   terminate();
   initialize();
-  if (!watchDirectory(_root))
+  if (watchDirectory(_root) <= 0)
   {
     _logger.logEvent("Failed to reinitialize inotify instance");
     throw InotifyError("Failed to reinitialize inotify instance");
@@ -149,27 +153,29 @@ bool Inotify::isIgnored(const std::string &path_name) const
 /**
  * Adds a directory and all of it's subdirectories to the inotify watch list while doing some sanity checks.
  * @param path The directory path to monitor.
- * @return True if successfully added, false otherwise.
+ * @return The number of directories that were added to the watch list, or -1 if the directory could not be watched.
  */
-bool Inotify::watchDirectory(const std::filesystem::path &path)
+int Inotify::watchDirectory(const std::filesystem::path &path)
 {
   std::stack<std::filesystem::path> dirs;
   if (!std::filesystem::is_directory(path))
   {
     _logger.logEvent("Failed to watch directory: %s", path.c_str());
-    return false;
+    return -1;
   }
 
   /* Check if the directory is in the ignored list */
-  if (isIgnored(path.filename())) return true;
+  if (isIgnored(path.filename())) return 0;
 
+  int dir_cnt = 0;
   dirs.push(path);
 
   while (!dirs.empty())
   {
     std::filesystem::path dir = dirs.top();
     dirs.pop();
-    if (addWatch(dir) == -1) return false;
+    if (addWatch(dir) == -1) return -1;
+    dir_cnt++;
 
     /* Using recursive_directory_iterator doesn't allow to properly
      * ignore the directories since it traverses into the subdirectories even if we ignore them
@@ -184,7 +190,7 @@ bool Inotify::watchDirectory(const std::filesystem::path &path)
     }
   }
 
-  return true;
+  return dir_cnt;
 }
 
 /**
@@ -388,28 +394,29 @@ void Inotify::processDirectoryEvent(const FileEvent &event)
 
   if (event.mask & IN_DELETE)
   {
+    _logger.logEvent("Deleted directory: %s", full_path.c_str());
     int child_wd = findWd(full_path);
-    if (child_wd != -1)
-    {
-      _wd_cache.erase(child_wd);
-      _logger.logEvent("Deleted directory: %s", full_path.c_str());
+    if (child_wd != -1) _wd_cache.erase(child_wd);
       /* No need to remove watch descriptor or zap subdirectories; */
       /* that happens automatically due to the order of how the events are processed.
        * Removing the cache entry is enough */
-    }
   }
   /* New subdirectory was created, or a subdirectory was renamed into the watch directory */
   else if (event.mask & (IN_CREATE | IN_MOVED_TO))
   {
     _logger.logEvent("Created directory: %s", full_path.c_str());
-
     /* Start watching the new subdirectory and its subdirectories */
-    watchDirectory(full_path);
+    if (watchDirectory(full_path) == -1)
+    {
+      /* Failed to recognize the directory or add the watch descriptor to it or it's subdirectories;
+       * In this case try to recover */
+      reinitialize();
+    }
   }
   /* A subdirectory was renamed or moved out of the watch directory */
   else if (event.mask & IN_MOVED_FROM)
   {
-    /* If no more events in the queue, we assume there will be no corresponding IN_MOVED_TO event */
+    /* If no more events in the queue, we assume there will be no corresponding IN_MOVED_TO event  */
     if (_event_queue.empty())
     {
       _logger.logEvent("Moved out of watch directory: %s", full_path.c_str());
@@ -435,8 +442,32 @@ void Inotify::processDirectoryEvent(const FileEvent &event)
         else
           _logger.logEvent("Moved directory: %s -> %s", full_path.c_str(), next_full_path.c_str());
 
+        if (isIgnored(next_full_path.filename()))
+        {
+          /* The new path is in the ignored list;
+           * zap the watch descriptor and cache entries for the old path and it's subdirectories
+           * and do nothing for the new path */
+          if (zapSubdirectories(full_path) == -1)
+          {
+            /* Cache reached inconsistent state; try to recover */
+            reinitialize();
+          }
+        }
+        else if (isIgnored(full_path.filename()))
+        {
+          /* The old path is in the ignored list;
+           * watch the new path and it's subdirectories */
+          if (watchDirectory(next_full_path) == -1)
+          {
+            /* Cache reached inconsistent state; try to recover */
+            reinitialize();
+          }
+        }
+        else
+        {
         /* Update the cache entries for the old and new paths */
         rewriteCachedPaths(full_path, next_full_path);
+        }
       }
       else
       {
