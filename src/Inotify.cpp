@@ -21,7 +21,7 @@ namespace inotify {
  * @throws std::invalid_argument if the root directory could not be watched.
  */
 Inotify::Inotify(const std::filesystem::path &path, const std::vector<std::string> &ignored)
-  : _root(path), _ignored_patterns(ignored), _logger{}
+  : _root(path), _ignored_dirs(ignored), _logger{}
 {
   initialize();
   int dir_watch_cnt = watchDirectory(path);
@@ -397,9 +397,9 @@ void Inotify::processDirectoryEvent(const FileEvent &event)
     _logger.logEvent("Deleted directory: %s", full_path.c_str());
     int child_wd = findWd(full_path);
     if (child_wd != -1) _wd_cache.erase(child_wd);
-      /* No need to remove watch descriptor or zap subdirectories; */
-      /* that happens automatically due to the order of how the events are processed.
-       * Removing the cache entry is enough */
+    /* No need to remove watch descriptor or zap subdirectories; */
+    /* that happens automatically due to the order of how the events are processed.
+     * Removing the cache entry is enough */
   }
   /* New subdirectory was created, or a subdirectory was renamed into the watch directory */
   else if (event.mask & (IN_CREATE | IN_MOVED_TO))
@@ -465,8 +465,8 @@ void Inotify::processDirectoryEvent(const FileEvent &event)
         }
         else
         {
-        /* Update the cache entries for the old and new paths */
-        rewriteCachedPaths(full_path, next_full_path);
+          /* Update the cache entries for the old and new paths */
+          rewriteCachedPaths(full_path, next_full_path);
         }
       }
       else
