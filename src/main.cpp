@@ -10,7 +10,7 @@ bool running = true;
 bool had_error = false;
 
 // Signal handler to gracefully stop the program
-void signalHandler(int signal) { running = false; }
+void signalHandler(int) { running = false; }
 
 // Check if a directory exists and is valid
 bool isValidDirectory(const std::filesystem::path& path)

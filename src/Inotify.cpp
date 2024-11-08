@@ -309,7 +309,7 @@ ssize_t Inotify::readEventsIntoBuffer()
 void Inotify::readEventsFromBuffer(ssize_t length)
 {
   uint8_t *event_buffer = _event_buffer.data();
-  size_t i = 0;
+  ssize_t i = 0;
   while (i < length)
   {
     auto event = reinterpret_cast<inotify_event *>(event_buffer + i);
